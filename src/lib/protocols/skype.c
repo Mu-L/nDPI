@@ -19,7 +19,7 @@
  */
 #include "ndpi_protocol_ids.h"
 
-#define NDPI_CURRENT_PROTO NDPI_PROTOCOL_SKYPE
+#define NDPI_CURRENT_PROTO NDPI_PROTOCOL_SKYPE_TEAMS
 
 #include "ndpi_api.h"
 
@@ -35,6 +35,15 @@ static int ndpi_check_skype_udp_again(struct ndpi_detection_module_struct *ndpi_
   const uint8_t crc_len = sizeof(flow->l4.udp.skype_crc);
   const uint8_t crc_offset = id_flags_iv_crc_len - crc_len;
 
+  if (flow->packet_counter > 2)
+  {
+    /*
+     * Process only one packet after the initial packet received.
+     * This is required to prevent fals-positives with other protocols e.g. dnscrypt.
+     */
+    return 0;
+  }
+
   if ((payload_len >= id_flags_iv_crc_len) && (packet->payload[2] == 0x02 /* Payload flag */ )) {
     u_int8_t detected = 1;
 
@@ -45,7 +54,7 @@ static int ndpi_check_skype_udp_again(struct ndpi_detection_module_struct *ndpi_
     }
 
     if (detected) {
-      ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SKYPE, NDPI_PROTOCOL_UNKNOWN);
+      ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SKYPE_TEAMS, NDPI_PROTOCOL_UNKNOWN);
       flow->extra_packets_func = NULL;
 
       /* Stop checking extra packets */
@@ -100,7 +109,7 @@ static void ndpi_check_skype(struct ndpi_detection_module_struct *ndpi_struct, s
 	  if(is_port(sport, dport, 8801)) {
 	    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_ZOOM, NDPI_PROTOCOL_UNKNOWN);
 	  } else if (payload_len >= 16 && packet->payload[0] != 0x01) /* Avoid invalid Cisco HSRP detection / RADIUS */ {
-	    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SKYPE_CALL, NDPI_PROTOCOL_SKYPE);
+	    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SKYPE_CALL, NDPI_PROTOCOL_SKYPE_TEAMS);
 	  }
 	}
 
@@ -150,7 +159,7 @@ static void ndpi_check_skype(struct ndpi_detection_module_struct *ndpi_struct, s
 	/* printf("[SKYPE] %u/%u\n", ntohs(packet->tcp->source), ntohs(packet->tcp->dest)); */
 	
 	NDPI_LOG_INFO(ndpi_struct, "found skype\n");
-	  ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SKYPE_CALL, NDPI_PROTOCOL_SKYPE);
+	  ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_SKYPE_TEAMS_CALL, NDPI_PROTOCOL_SKYPE_TEAMS);
       } else {
 	// printf("NO [SKYPE] payload_len=%u\n", payload_len);
       }
@@ -172,7 +181,7 @@ void ndpi_search_skype(struct ndpi_detection_module_struct *ndpi_struct, struct 
   NDPI_LOG_DBG(ndpi_struct, "search skype\n");
 
   /* skip marked packets */
-  if(packet->detected_protocol_stack[0] != NDPI_PROTOCOL_SKYPE)
+  if(packet->detected_protocol_stack[0] != NDPI_PROTOCOL_SKYPE_TEAMS)
     ndpi_check_skype(ndpi_struct, flow);
 }
 
@@ -180,7 +189,7 @@ void ndpi_search_skype(struct ndpi_detection_module_struct *ndpi_struct, struct 
 void init_skype_dissector(struct ndpi_detection_module_struct *ndpi_struct, u_int32_t *id, NDPI_PROTOCOL_BITMASK *detection_bitmask)
 {
   ndpi_set_bitmask_protocol_detection("Skype", ndpi_struct, detection_bitmask, *id,
-				      NDPI_PROTOCOL_SKYPE,
+				      NDPI_PROTOCOL_SKYPE_TEAMS,
 				      ndpi_search_skype,
 				      NDPI_SELECTION_BITMASK_PROTOCOL_TCP_OR_UDP_WITH_PAYLOAD,
 				      SAVE_DETECTION_BITMASK_AS_UNKNOWN,

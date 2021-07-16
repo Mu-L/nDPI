@@ -63,9 +63,10 @@ typedef enum {
   NOTE
   When the typedef below is modified don't forget to update
   - nDPI/wireshark/ndpi.lua
-  - ndpi_risk2str and ndpi_risk2severity (in ndpi_utils.c)
+  - ndpi_risk2str (in ndpi_utils.c)
   - https://github.com/ntop/ntopng/blob/dev/scripts/lua/modules/flow_risk_utils.lua
   - ndpi_risk_enum (in python/ndpi.py)
+  - ndpi_known_risks (ndpi_utils.c)
  */
 typedef enum {
   NDPI_NO_RISK = 0,
@@ -100,6 +101,7 @@ typedef enum {
   NDPI_MALICIOUS_SHA1_CERTIFICATE,
   NDPI_DESKTOP_OR_FILE_SHARING_SESSION, /* 30 */
   NDPI_TLS_UNCOMMON_ALPN,
+  NDPI_TLS_CERT_VALIDITY_TOO_LONG,
 
   /* Leave this as last member */
   NDPI_MAX_RISK /* must be <= 63 due to (**) */
@@ -114,10 +116,27 @@ typedef enum {
   NDPI_RISK_SEVERE
 } ndpi_risk_severity;
 
-#define NDPI_SCORE_RISK_LOW      10
-#define NDPI_SCORE_RISK_MEDIUM   50
-#define NDPI_SCORE_RISK_HIGH    100
-#define NDPI_SCORE_RISK_SEVERE  250
+typedef enum {
+  NDPI_SCORE_RISK_LOW    =  10,
+  NDPI_SCORE_RISK_MEDIUM =  50,
+  NDPI_SCORE_RISK_HIGH   = 100,
+  NDPI_SCORE_RISK_SEVERE = 250,
+} ndpi_risk_score;
+
+typedef enum {
+  CLIENT_NO_RISK_PERCENTAGE   =   0, /* 100% server risk */
+  CLIENT_LOW_RISK_PERCENTAGE  =  10, /* 90%  server risk */
+  CLIENT_FAIR_RISK_PERCENTAGE =  50, /* 50%  server risk */
+  CLIENT_HIGH_RISK_PERCENTAGE =  90, /* 10%  server risk */
+  CLIENT_FULL_RISK_PERCENTAGE = 100 /* 0%   server risk */
+} risk_percentage;
+
+typedef struct {
+  ndpi_risk_enum risk;
+  ndpi_risk_severity severity;
+  risk_percentage default_client_risk_pctg; /* 0-100 */
+} ndpi_risk_info;
+
 
 /* NDPI_VISIT */
 typedef enum {
@@ -823,6 +842,10 @@ struct ndpi_flow_udp_struct {
   /* NDPI_PROTOCOL_WIREGUARD */
   u_int8_t wireguard_stage;
   u_int32_t wireguard_peer_index[2];
+
+  /* NDPI_PROTOCOL_QUIC */
+  u_int8_t *quic_reasm_buf;
+  u_int32_t quic_reasm_buf_len;
 };
 
 /* ************************************************** */
@@ -905,11 +928,11 @@ struct ndpi_detection_module_struct;
 struct ndpi_flow_struct;
 
 struct ndpi_call_function_struct {
-  u_int16_t ndpi_protocol_id;
   NDPI_PROTOCOL_BITMASK detection_bitmask;
   NDPI_PROTOCOL_BITMASK excluded_protocol_bitmask;
-  NDPI_SELECTION_BITMASK_PROTOCOL_SIZE ndpi_selection_bitmask;
   void (*func) (struct ndpi_detection_module_struct *, struct ndpi_flow_struct *flow);
+  NDPI_SELECTION_BITMASK_PROTOCOL_SIZE ndpi_selection_bitmask;
+  u_int16_t ndpi_protocol_id;
   u_int8_t detection_feature;
 };
 
@@ -922,95 +945,95 @@ typedef struct {
 } ndpi_port_range;
 
 typedef enum {
-	      NDPI_PROTOCOL_SAFE = 0,              /* Surely doesn't provide risks for the network. (e.g., a news site) */
-	      NDPI_PROTOCOL_ACCEPTABLE,            /* Probably doesn't provide risks, but could be malicious (e.g., Dropbox) */
-	      NDPI_PROTOCOL_FUN,                   /* Pure fun protocol, which may be prohibited by the user policy (e.g., Netflix) */
-	      NDPI_PROTOCOL_UNSAFE,                /* Probably provides risks, but could be a normal traffic. Unencrypted protocols with clear pass should be here (e.g., telnet) */
-	      NDPI_PROTOCOL_POTENTIALLY_DANGEROUS, /* Possibly dangerous (ex. Tor). */
-	      NDPI_PROTOCOL_DANGEROUS,             /* Surely is dangerous (ex. smbv1). Be prepared to troubles */
-	      NDPI_PROTOCOL_TRACKER_ADS,           /* Trackers, Advertisements... */
-	      NDPI_PROTOCOL_UNRATED                /* No idea, not implemented or impossible to classify */
+  NDPI_PROTOCOL_SAFE = 0,              /* Surely doesn't provide risks for the network. (e.g., a news site) */
+  NDPI_PROTOCOL_ACCEPTABLE,            /* Probably doesn't provide risks, but could be malicious (e.g., Dropbox) */
+  NDPI_PROTOCOL_FUN,                   /* Pure fun protocol, which may be prohibited by the user policy (e.g., Netflix) */
+  NDPI_PROTOCOL_UNSAFE,                /* Probably provides risks, but could be a normal traffic. Unencrypted protocols with clear pass should be here (e.g., telnet) */
+  NDPI_PROTOCOL_POTENTIALLY_DANGEROUS, /* Possibly dangerous (ex. Tor). */
+  NDPI_PROTOCOL_DANGEROUS,             /* Surely is dangerous (ex. smbv1). Be prepared to troubles */
+  NDPI_PROTOCOL_TRACKER_ADS,           /* Trackers, Advertisements... */
+  NDPI_PROTOCOL_UNRATED                /* No idea, not implemented or impossible to classify */
 } ndpi_protocol_breed_t;
 
 #define NUM_BREEDS (NDPI_PROTOCOL_UNRATED+1)
 
 /* Abstract categories to group the protocols. */
 typedef enum {
-	      NDPI_PROTOCOL_CATEGORY_UNSPECIFIED = 0,   /* For general services and unknown protocols */
-	      NDPI_PROTOCOL_CATEGORY_MEDIA,             /* Multimedia and streaming */
-	      NDPI_PROTOCOL_CATEGORY_VPN,               /* Virtual Private Networks */
-	      NDPI_PROTOCOL_CATEGORY_MAIL,              /* Protocols to send/receive/sync emails */
-	      NDPI_PROTOCOL_CATEGORY_DATA_TRANSFER,     /* AFS/NFS and similar protocols */
-	      NDPI_PROTOCOL_CATEGORY_WEB,               /* Web/mobile protocols and services */
-	      NDPI_PROTOCOL_CATEGORY_SOCIAL_NETWORK,    /* Social networks */
-	      NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT,       /* Download, FTP, file transfer/sharing */
-	      NDPI_PROTOCOL_CATEGORY_GAME,              /* Online games */
-	      NDPI_PROTOCOL_CATEGORY_CHAT,              /* Instant messaging */
-	      NDPI_PROTOCOL_CATEGORY_VOIP,              /* Real-time communications and conferencing */
-	      NDPI_PROTOCOL_CATEGORY_DATABASE,          /* Protocols for database communication */
-	      NDPI_PROTOCOL_CATEGORY_REMOTE_ACCESS,     /* Remote access and control */
-	      NDPI_PROTOCOL_CATEGORY_CLOUD,             /* Online cloud services */
-	      NDPI_PROTOCOL_CATEGORY_NETWORK,           /* Network infrastructure protocols */
-	      NDPI_PROTOCOL_CATEGORY_COLLABORATIVE,     /* Software for collaborative development, including Webmail */
-	      NDPI_PROTOCOL_CATEGORY_RPC,               /* High level network communication protocols */
-	      NDPI_PROTOCOL_CATEGORY_STREAMING,         /* Streaming protocols */
-	      NDPI_PROTOCOL_CATEGORY_SYSTEM_OS,         /* System/Operating System level applications */
-	      NDPI_PROTOCOL_CATEGORY_SW_UPDATE,         /* Software update */
+  NDPI_PROTOCOL_CATEGORY_UNSPECIFIED = 0,   /* For general services and unknown protocols */
+  NDPI_PROTOCOL_CATEGORY_MEDIA,             /* Multimedia and streaming */
+  NDPI_PROTOCOL_CATEGORY_VPN,               /* Virtual Private Networks */
+  NDPI_PROTOCOL_CATEGORY_MAIL,              /* Protocols to send/receive/sync emails */
+  NDPI_PROTOCOL_CATEGORY_DATA_TRANSFER,     /* AFS/NFS and similar protocols */
+  NDPI_PROTOCOL_CATEGORY_WEB,               /* Web/mobile protocols and services */
+  NDPI_PROTOCOL_CATEGORY_SOCIAL_NETWORK,    /* Social networks */
+  NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT,       /* Download, FTP, file transfer/sharing */
+  NDPI_PROTOCOL_CATEGORY_GAME,              /* Online games */
+  NDPI_PROTOCOL_CATEGORY_CHAT,              /* Instant messaging */
+  NDPI_PROTOCOL_CATEGORY_VOIP,              /* Real-time communications and conferencing */
+  NDPI_PROTOCOL_CATEGORY_DATABASE,          /* Protocols for database communication */
+  NDPI_PROTOCOL_CATEGORY_REMOTE_ACCESS,     /* Remote access and control */
+  NDPI_PROTOCOL_CATEGORY_CLOUD,             /* Online cloud services */
+  NDPI_PROTOCOL_CATEGORY_NETWORK,           /* Network infrastructure protocols */
+  NDPI_PROTOCOL_CATEGORY_COLLABORATIVE,     /* Software for collaborative development, including Webmail */
+  NDPI_PROTOCOL_CATEGORY_RPC,               /* High level network communication protocols */
+  NDPI_PROTOCOL_CATEGORY_STREAMING,         /* Streaming protocols */
+  NDPI_PROTOCOL_CATEGORY_SYSTEM_OS,         /* System/Operating System level applications */
+  NDPI_PROTOCOL_CATEGORY_SW_UPDATE,         /* Software update */
+  
+  /* See #define NUM_CUSTOM_CATEGORIES */
+  NDPI_PROTOCOL_CATEGORY_CUSTOM_1,          /* User custom category 1 */
+  NDPI_PROTOCOL_CATEGORY_CUSTOM_2,          /* User custom category 2 */
+  NDPI_PROTOCOL_CATEGORY_CUSTOM_3,          /* User custom category 3 */
+  NDPI_PROTOCOL_CATEGORY_CUSTOM_4,          /* User custom category 4 */
+  NDPI_PROTOCOL_CATEGORY_CUSTOM_5,          /* User custom category 5 */
+  
+  /* Further categories... */
+  NDPI_PROTOCOL_CATEGORY_MUSIC,
+  NDPI_PROTOCOL_CATEGORY_VIDEO,
+  NDPI_PROTOCOL_CATEGORY_SHOPPING,
+  NDPI_PROTOCOL_CATEGORY_PRODUCTIVITY,
+  NDPI_PROTOCOL_CATEGORY_FILE_SHARING,
+  /*
+    The category below is used by sites who are used
+    to test connectivity
+  */
+  NDPI_PROTOCOL_CATEGORY_CONNECTIVITY_CHECK,
+  NDPI_PROTOCOL_CATEGORY_IOT_SCADA,
+  /*
+    The category below is used for vocal assistance services.
+  */
+  NDPI_PROTOCOL_CATEGORY_VIRTUAL_ASSISTANT,
+  
+  /* Some custom categories */
+  CUSTOM_CATEGORY_MINING           = 99,
+  CUSTOM_CATEGORY_MALWARE          = 100,
+  CUSTOM_CATEGORY_ADVERTISEMENT    = 101,
+  CUSTOM_CATEGORY_BANNED_SITE      = 102,
+  CUSTOM_CATEGORY_SITE_UNAVAILABLE = 103,
+  CUSTOM_CATEGORY_ALLOWED_SITE     = 104,
+  /*
+    The category below is used to track communications made by
+    security applications (e.g. sophosxl.net, spamhaus.org)
+    to track malware, spam etc.
+  */
+  CUSTOM_CATEGORY_ANTIMALWARE      = 105,
+  
+  /*
+    IMPORTANT
 
-	      /* See #define NUM_CUSTOM_CATEGORIES */
-	      NDPI_PROTOCOL_CATEGORY_CUSTOM_1,          /* User custom category 1 */
-	      NDPI_PROTOCOL_CATEGORY_CUSTOM_2,          /* User custom category 2 */
-	      NDPI_PROTOCOL_CATEGORY_CUSTOM_3,          /* User custom category 3 */
-	      NDPI_PROTOCOL_CATEGORY_CUSTOM_4,          /* User custom category 4 */
-	      NDPI_PROTOCOL_CATEGORY_CUSTOM_5,          /* User custom category 5 */
+    Please keep in sync with
 
-	      /* Further categories... */
-	      NDPI_PROTOCOL_CATEGORY_MUSIC,
-	      NDPI_PROTOCOL_CATEGORY_VIDEO,
-	      NDPI_PROTOCOL_CATEGORY_SHOPPING,
-	      NDPI_PROTOCOL_CATEGORY_PRODUCTIVITY,
-	      NDPI_PROTOCOL_CATEGORY_FILE_SHARING,
-	      /*
-		 The category below is used by sites who are used
-		 to test connectivity
-	       */
-	      NDPI_PROTOCOL_CATEGORY_CONNECTIVITY_CHECK,
-	      NDPI_PROTOCOL_CATEGORY_IOT_SCADA,
-	      /*
-		 The category below is used for vocal assistance services.
-	       */
-	      NDPI_PROTOCOL_CATEGORY_VIRTUAL_ASSISTANT,
+    static const char* categories[] = { ..}
 
-	      /* Some custom categories */
-	      CUSTOM_CATEGORY_MINING           = 99,
-	      CUSTOM_CATEGORY_MALWARE          = 100,
-	      CUSTOM_CATEGORY_ADVERTISEMENT    = 101,
-	      CUSTOM_CATEGORY_BANNED_SITE      = 102,
-	      CUSTOM_CATEGORY_SITE_UNAVAILABLE = 103,
-	      CUSTOM_CATEGORY_ALLOWED_SITE     = 104,
-	      /*
-		The category below is used to track communications made by
-		security applications (e.g. sophosxl.net, spamhaus.org)
-		to track malware, spam etc.
-	      */
-	      CUSTOM_CATEGORY_ANTIMALWARE      = 105,
+    in ndpi_main.c
+  */
 
-	      /*
-		IMPORTANT
-
-		Please keep in sync with
-
-		static const char* categories[] = { ..}
-
-		in ndpi_main.c
-	      */
-
-	      NDPI_PROTOCOL_NUM_CATEGORIES, /*
-					     NOTE: Keep this as last member
-					     Unused as value but useful to getting the number of elements
-					     in this datastructure
-					   */
-              NDPI_PROTOCOL_ANY_CATEGORY /* Used to handle wildcards */
+  NDPI_PROTOCOL_NUM_CATEGORIES, /*
+				  NOTE: Keep this as last member
+				  Unused as value but useful to getting the number of elements
+				  in this datastructure
+				*/
+  NDPI_PROTOCOL_ANY_CATEGORY /* Used to handle wildcards */
 } ndpi_protocol_category_t;
 
 typedef enum {
@@ -1038,7 +1061,6 @@ typedef struct ndpi_default_ports_tree_node {
 
 typedef struct _ndpi_automa {
   void *ac_automa; /* Real type is AC_AUTOMATA_t */
-  u_int8_t ac_automa_finalized;
 } ndpi_automa;
 
 typedef struct ndpi_proto {
@@ -1131,11 +1153,11 @@ struct ndpi_detection_module_struct {
   u_int ndpi_num_supported_protocols;
   u_int ndpi_num_custom_protocols;
 
+  int ac_automa_finalized;
   /* HTTP/DNS/HTTPS/QUIC host matching */
   ndpi_automa host_automa,                     /* Used for DNS/HTTPS */
     content_automa,                            /* Used for HTTP subprotocol_detection */
     subprotocol_automa,                        /* Used for HTTP subprotocol_detection */
-    bigrams_automa, trigrams_automa, impossible_bigrams_automa, /* TOR */
     risky_domain_automa, tls_cert_subject_automa,
     malicious_ja3_automa, malicious_sha1_automa;
   /* IMPORTANT: please update ndpi_finalize_initialization() whenever you add a new automa */
@@ -1184,6 +1206,9 @@ struct ndpi_detection_module_struct {
   /* NDPI_PROTOCOL_STUN and subprotocols */
   struct ndpi_lru_cache *stun_cache;
 
+  /* NDPI_PROTOCOL_TLS and subprotocols */
+  struct ndpi_lru_cache *tls_cert_cache;
+  
   /* NDPI_PROTOCOL_MINING and subprotocols */
   struct ndpi_lru_cache *mining_cache;
 
@@ -1221,7 +1246,7 @@ struct tls_euristics {
     TLS euristics for detecting browsers usage
     NOTE: expect false positives
   */
-  u_int8_t is_safari_tls:1, is_firefox_tls:1, notused:6;
+  u_int8_t is_safari_tls:1, is_firefox_tls:1, is_chrome_tls:1, notused:5;
 };
 
 /*
@@ -1243,14 +1268,6 @@ struct ndpi_flow_struct {
     tcp sequence number connection tracking
   */
   u_int32_t next_tcp_seq_nr[2];
-
-#ifdef FRAG_MAN
-  /* tcp_segments lists */
-  u_int8_t tcp_segments_management:1;
-  u_int8_t not_sorted[2],must_free[2];     // 0: client->server and 1: server->client
-  uint32_t trigger[2];                     // the seq waited number to start to reassembly
-  fragments_wrapper_t tcp_segments_list[2];
-#endif // FRAG_MAN
 
   // -----------------------------------------
 
@@ -1460,6 +1477,9 @@ struct ndpi_flow_struct {
   /* NDPI_PROTOCOL_STARCRAFT */
   u_int8_t starcraft_udp_stage : 3;	// 0-7
 
+  /* NDPI_PROTOCOL_Z3950 */
+  u_int8_t z3950_stage : 2; // 0-3
+
   /* NDPI_PROTOCOL_OPENVPN */
   u_int8_t ovpn_session_id[8];
   u_int8_t ovpn_counter;
@@ -1484,6 +1504,7 @@ typedef struct {
   u_int16_t protocol_id;
   ndpi_protocol_category_t protocol_category;
   ndpi_protocol_breed_t protocol_breed;
+  int level; /* 0 by default */
 } ndpi_protocol_match;
 
 typedef struct {
@@ -1513,7 +1534,7 @@ typedef enum
   } ndpi_prefs;
 
 typedef struct {
-  int protocol_id;
+  u_int32_t protocol_id;
   ndpi_protocol_category_t protocol_category;
   ndpi_protocol_breed_t protocol_breed;
 } ndpi_protocol_match_result;
@@ -1707,7 +1728,7 @@ struct ndpi_hw_struct {
   double    u, v, sum_square_error;
 
   /* These two values need to store the signal history */
-  u_int32_t *y;
+  u_int64_t *y;
   double    *s;
 };
 

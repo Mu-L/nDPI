@@ -49,6 +49,7 @@
 #include <math.h>
 #include "ndpi_api.h"
 #include "../src/lib/third_party/include/uthash.h"
+#include "../src/lib/third_party/include/ahocorasick.h"
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -59,6 +60,8 @@
 
 #define ntohl64(x) ( ( (uint64_t)(ntohl( (uint32_t)((x << 32) >> 32) )) << 32) | ntohl( ((uint32_t)(x >> 32)) ) )
 #define htonl64(x) ntohl64(x)
+
+#define EURISTICS_CODE 1
 
 /** Client parameters **/
 
@@ -96,6 +99,7 @@ static struct timeval startup_time, begin, end;
 static int core_affinity[MAX_NUM_READER_THREADS];
 #endif
 static struct timeval pcap_start = { 0, 0}, pcap_end = { 0, 0 };
+static struct bpf_program bpf_code,*bpf_cfilter = NULL;
 /** Detection parameters **/
 static time_t capture_for = 0;
 static time_t capture_until = 0;
@@ -222,7 +226,7 @@ extern void ndpi_report_payload_stats();
 
 /* ********************************** */
 
-#define DEBUG_TRACE
+// #define DEBUG_TRACE
 
 #ifdef DEBUG_TRACE
 FILE *trace = NULL;
@@ -533,6 +537,9 @@ static void help(u_int long_help) {
     ndpi_set_protocol_detection_bitmask2(ndpi_info_mod, &all);
 
     ndpi_dump_protocols(ndpi_info_mod);
+
+    printf("\n\nnDPI supported risks:\n");
+    ndpi_dump_risks_score();
   }
 
   exit(!long_help);
@@ -1182,7 +1189,7 @@ void print_bin(FILE *fout, const char *label, struct ndpi_bin *b) {
 /**
  * @brief Print the flow
  */
-static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t thread_id) {
+static void printFlow(u_int32_t id, struct ndpi_flow_info *flow, u_int16_t thread_id) {
   FILE *out = results_file ? results_file : stdout;
   u_int8_t known_tls;
   char buf[32], buf1[64];
@@ -1431,7 +1438,7 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
 
   if(flow->risk) {
     u_int i;
-
+    u_int16_t cli_score, srv_score;
     fprintf(out, "[Risk: ");
 
     for(i=0; i<NDPI_MAX_RISK; i++)
@@ -1439,8 +1446,10 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
 	fprintf(out, "** %s **", ndpi_risk2str(i));
 
     fprintf(out, "]");
-  }
 
+    fprintf(out, "[Risk Score: %u]", ndpi_risk2score(flow->risk, &cli_score, &srv_score));
+  }
+  
   if(flow->ssh_tls.ssl_version != 0) fprintf(out, "[%s]", ndpi_ssl_version2str(flow->ndpi_flow, flow->ssh_tls.ssl_version, &known_tls));
   if(flow->ssh_tls.client_requested_server_name[0] != '\0') fprintf(out, "[Client: %s]", flow->ssh_tls.client_requested_server_name);
   if(flow->ssh_tls.client_hassh[0] != '\0') fprintf(out, "[HASSH-C: %s]", flow->ssh_tls.client_hassh);
@@ -1478,6 +1487,7 @@ static void printFlow(u_int16_t id, struct ndpi_flow_info *flow, u_int16_t threa
 #ifdef EURISTICS_CODE
   if(flow->ssh_tls.browser_euristics.is_safari_tls)  fprintf(out, "[Safari]");
   if(flow->ssh_tls.browser_euristics.is_firefox_tls) fprintf(out, "[Firefox]");
+  if(flow->ssh_tls.browser_euristics.is_chrome_tls)  fprintf(out, "[Chrome]");
 #endif
   
   if(flow->ssh_tls.notBefore && flow->ssh_tls.notAfter) {
@@ -2271,16 +2281,18 @@ void printPortStats(struct port_stats *stats) {
 static void node_flow_risk_walker(const void *node, ndpi_VISIT which, int depth, void *user_data) {
   struct ndpi_flow_info *f = *(struct ndpi_flow_info**)node;
 
-  if(f->risk) {
-    u_int j;
+  if((which == ndpi_preorder) || (which == ndpi_leaf)) { /* Avoid walking the same node multiple times */
+    if(f->risk) {
+      u_int j;
 
-    flows_with_risks++;
+      flows_with_risks++;
 
-    for(j = 0; j < NDPI_MAX_RISK; j++) {
-      ndpi_risk_enum r = (ndpi_risk_enum)j;
+      for(j = 0; j < NDPI_MAX_RISK; j++) {
+        ndpi_risk_enum r = (ndpi_risk_enum)j;
 
-      if(NDPI_ISSET_BIT(f->risk, r))
-	risks_found++, risk_stats[r]++;
+        if(NDPI_ISSET_BIT(f->risk, r))
+	  risks_found++, risk_stats[r]++;
+      }
     }
   }
 }
@@ -2904,6 +2916,9 @@ static void printResults(u_int64_t processing_time_usec, u_int64_t setup_time_us
     }
 
     cumulative_stats.ndpi_flow_count += ndpi_thread_info[thread_id].workflow->stats.ndpi_flow_count;
+    cumulative_stats.flow_count[0] += ndpi_thread_info[thread_id].workflow->stats.flow_count[0];
+    cumulative_stats.flow_count[1] += ndpi_thread_info[thread_id].workflow->stats.flow_count[1];
+    cumulative_stats.flow_count[2] += ndpi_thread_info[thread_id].workflow->stats.flow_count[2];
     cumulative_stats.tcp_count   += ndpi_thread_info[thread_id].workflow->stats.tcp_count;
     cumulative_stats.udp_count   += ndpi_thread_info[thread_id].workflow->stats.udp_count;
     cumulative_stats.mpls_count  += ndpi_thread_info[thread_id].workflow->stats.mpls_count;
@@ -2913,6 +2928,10 @@ static void printResults(u_int64_t processing_time_usec, u_int64_t setup_time_us
     for(i = 0; i < sizeof(cumulative_stats.packet_len)/sizeof(cumulative_stats.packet_len[0]); i++)
       cumulative_stats.packet_len[i] += ndpi_thread_info[thread_id].workflow->stats.packet_len[i];
     cumulative_stats.max_packet_len += ndpi_thread_info[thread_id].workflow->stats.max_packet_len;
+
+    cumulative_stats.dpi_packet_count[0] += ndpi_thread_info[thread_id].workflow->stats.dpi_packet_count[0];
+    cumulative_stats.dpi_packet_count[1] += ndpi_thread_info[thread_id].workflow->stats.dpi_packet_count[1];
+    cumulative_stats.dpi_packet_count[2] += ndpi_thread_info[thread_id].workflow->stats.dpi_packet_count[2];
   }
 
   if(cumulative_stats.total_wire_bytes == 0)
@@ -2984,8 +3003,39 @@ static void printResults(u_int64_t processing_time_usec, u_int64_t setup_time_us
 
       if(enable_protocol_guess)
 	printf("\tGuessed flow protos:   %-13u\n", cumulative_stats.guessed_flow_protocols);
+
+      if(cumulative_stats.flow_count[0])
+        printf("\tDPI Packets (TCP):     %-13llu (%.2f pkts/flow)\n",
+               (long long unsigned int)cumulative_stats.dpi_packet_count[0],
+               cumulative_stats.dpi_packet_count[0] / (float)cumulative_stats.flow_count[0]);
+      if(cumulative_stats.flow_count[1])
+        printf("\tDPI Packets (UDP):     %-13llu (%.2f pkts/flow)\n",
+               (long long unsigned int)cumulative_stats.dpi_packet_count[1],
+               cumulative_stats.dpi_packet_count[1] / (float)cumulative_stats.flow_count[1]);
+      if(cumulative_stats.flow_count[2])
+        printf("\tDPI Packets (other):   %-13llu (%.2f pkts/flow)\n",
+               (long long unsigned int)cumulative_stats.dpi_packet_count[2],
+               cumulative_stats.dpi_packet_count[2] / (float)cumulative_stats.flow_count[2]);
   }
 
+  if(results_file) {
+      if(enable_protocol_guess)
+        fprintf(results_file, "Guessed flow protos:\t%u\n\n", cumulative_stats.guessed_flow_protocols);
+
+      if(cumulative_stats.flow_count[0])
+        fprintf(results_file, "DPI Packets (TCP):\t%llu\t(%.2f pkts/flow)\n",
+               (long long unsigned int)cumulative_stats.dpi_packet_count[0],
+               cumulative_stats.dpi_packet_count[0] / (float)cumulative_stats.flow_count[0]);
+      if(cumulative_stats.flow_count[1])
+        fprintf(results_file, "DPI Packets (UDP):\t%llu\t(%.2f pkts/flow)\n",
+               (long long unsigned int)cumulative_stats.dpi_packet_count[1],
+               cumulative_stats.dpi_packet_count[1] / (float)cumulative_stats.flow_count[1]);
+      if(cumulative_stats.flow_count[2])
+        fprintf(results_file, "DPI Packets (other):\t%llu\t(%.2f pkts/flow)\n",
+               (long long unsigned int)cumulative_stats.dpi_packet_count[2],
+               cumulative_stats.dpi_packet_count[2] / (float)cumulative_stats.flow_count[2]);
+      fprintf(results_file, "\n");
+  }
 
   if(!quiet_mode) printf("\n\nDetected protocols:\n");
   for(i = 0; i <= ndpi_get_num_supported_protocols(ndpi_thread_info[0].workflow->ndpi_struct); i++) {
@@ -3128,14 +3178,17 @@ next_line:
 static void configurePcapHandle(pcap_t * pcap_handle) {
 
   if(bpfFilter != NULL) {
-    struct bpf_program fcode;
 
-    if(pcap_compile(pcap_handle, &fcode, bpfFilter, 1, 0xFFFFFF00) < 0) {
-      printf("pcap_compile error: '%s'\n", pcap_geterr(pcap_handle));
-    } else {
-      if(pcap_setfilter(pcap_handle, &fcode) < 0) {
+    if(!bpf_cfilter) {
+      if(pcap_compile(pcap_handle, &bpf_code, bpfFilter, 1, 0xFFFFFF00) < 0) {
+        printf("pcap_compile error: '%s'\n", pcap_geterr(pcap_handle));
+        return;
+      }
+      bpf_cfilter = &bpf_code;
+    }
+    if(pcap_setfilter(pcap_handle, bpf_cfilter) < 0) {
 	printf("pcap_setfilter error: '%s'\n", pcap_geterr(pcap_handle));
-      } else
+    } else {
 	printf("Successfully set BPF filter to '%s'\n", bpfFilter);
     }
   }
@@ -3280,9 +3333,10 @@ static void ndpi_process_packet(u_char *args,
        )
     ) {
     struct pcap_pkthdr h;
-    uint32_t *crc, delta = sizeof(struct ndpi_packet_trailer) + 4 /* ethernet trailer */;
+    u_int32_t *crc, delta = sizeof(struct ndpi_packet_trailer) + 4 /* ethernet trailer */;
     struct ndpi_packet_trailer *trailer;
-
+    u_int16_t cli_score, srv_score;
+    
     memcpy(&h, header, sizeof(h));
 
     if(h.caplen > (sizeof(extcap_buf)-sizeof(struct ndpi_packet_trailer) - 4)) {
@@ -3295,7 +3349,7 @@ static void ndpi_process_packet(u_char *args,
     memset(trailer, 0, sizeof(struct ndpi_packet_trailer));
     trailer->magic = htonl(WIRESHARK_NTOP_MAGIC);
     trailer->flow_risk = htonl64(flow_risk);
-    trailer->flow_score = htons(ndpi_risk2score(flow_risk));
+    trailer->flow_score = htons(ndpi_risk2score(flow_risk, &cli_score, &srv_score));
     trailer->master_protocol = htons(p.master_protocol), trailer->app_protocol = htons(p.app_protocol);
     ndpi_protocol2name(ndpi_thread_info[thread_id].workflow->ndpi_struct, p, trailer->name, sizeof(trailer->name));
     crc = (uint32_t*)&extcap_buf[h.caplen+sizeof(struct ndpi_packet_trailer)];
@@ -3418,6 +3472,11 @@ void * processing_thread(void *_thread_id) {
 pcap_loop:
   runPcapLoop(thread_id);
 
+  if(ndpi_thread_info[thread_id].workflow->pcap_handle)
+    pcap_close(ndpi_thread_info[thread_id].workflow->pcap_handle);
+
+  ndpi_thread_info[thread_id].workflow->pcap_handle = NULL;
+
   if(playlist_fp[thread_id] != NULL) { /* playlist: read next file */
     char filename[256];
 
@@ -3428,6 +3487,10 @@ pcap_loop:
     }
   }
 #endif
+  if(bpf_cfilter) {
+	  pcap_freecode(bpf_cfilter);
+	  bpf_cfilter = NULL;
+  }
 
   return NULL;
 }
@@ -3581,6 +3644,7 @@ static void dgaUnitTest() {
   };
 
   const char *non_dga[] = {
+    "dns.msftncsi.com",
     "www.confindustriabrescia.it",
     "mz.gov.pl",
     "zoomam104zc.zoom.us",
@@ -3613,7 +3677,7 @@ static void dgaUnitTest() {
     "mqtt.facebook.com",
     NULL
   };
-  int i;
+  int debug = 0, i;
   NDPI_PROTOCOL_BITMASK all;
   struct ndpi_detection_module_struct *ndpi_str = ndpi_init_detection_module(enable_ja3_plus ? ndpi_enable_ja3_plus : ndpi_no_prefs);
 
@@ -3626,14 +3690,16 @@ static void dgaUnitTest() {
 
   assert(ndpi_str != NULL);
 
-  for(i=0; dga[i] != NULL; i++)
-    assert(ndpi_check_dga_name(ndpi_str, NULL, (char*)dga[i], 1) == 1);
-
   for(i=0; non_dga[i] != NULL; i++) {
-    /* printf("Checking non DGA %s\n", non_dga[i]); */
+    if(debug) printf("Checking non DGA %s\n", non_dga[i]);
     assert(ndpi_check_dga_name(ndpi_str, NULL, (char*)non_dga[i], 1) == 0);
   }
-
+  
+  for(i=0; dga[i] != NULL; i++) {
+    if(debug) printf("Checking DGA %s\n", non_dga[i]);
+    assert(ndpi_check_dga_name(ndpi_str, NULL, (char*)dga[i], 1) == 1);
+  }
+  
   ndpi_exit_detection_module(ndpi_str);
 }
 
@@ -3679,8 +3745,8 @@ void automataUnitTest() {
   void *automa = ndpi_init_automa();
 
   assert(automa);
-  assert(ndpi_add_string_to_automa(automa, "hello") == 0);
-  assert(ndpi_add_string_to_automa(automa, "world") == 0);
+  assert(ndpi_add_string_to_automa(automa, strdup("hello")) == 0);
+  assert(ndpi_add_string_to_automa(automa, strdup("world")) == 0);
   ndpi_finalize_automa(automa);
   assert(ndpi_match_string(automa, "This is the wonderful world of nDPI") == 1);
   ndpi_free_automa(automa);
@@ -4241,7 +4307,7 @@ int original_main(int argc, char **argv) {
 #else
   int main(int argc, char **argv) {
 #endif
-    int i;
+    int i, skip_unit_tests = 0;
 
 #ifdef DEBUG_TRACE
     trace = fopen("/tmp/ndpiReader.log", "a");
@@ -4263,40 +4329,44 @@ int original_main(int argc, char **argv) {
       return(-1);
     }
 
+    if(!skip_unit_tests) {
 #ifndef DEBUG_TRACE
-    /* Skip tests when debugging */
+      /* Skip tests when debugging */
 
 #ifdef HW_TEST
-    hwUnitTest2();
+      hwUnitTest2();
 #endif
 
 #ifdef STRESS_TEST
-    desUnitStressTest();
-    exit(0);
+      desUnitStressTest();
+      exit(0);
 #endif
 
-    sesUnitTest();
-    desUnitTest();
+      sesUnitTest();
+      desUnitTest();
 
-    /* Internal checks */
-    // binUnitTest();
-    //hwUnitTest();
-    jitterUnitTest();
-    rsiUnitTest();
-    hashUnitTest();
-    dgaUnitTest();
-    hllUnitTest();
-    bitmapUnitTest();
-    automataUnitTest();
-    analyzeUnitTest();
-    ndpi_self_check_host_match();
-    analysisUnitTest();
-    rulesUnitTest();
+      /* Internal checks */
+      // binUnitTest();
+      //hwUnitTest();
+      jitterUnitTest();
+      rsiUnitTest();
+      hashUnitTest();
+      dgaUnitTest();
+      hllUnitTest();
+      bitmapUnitTest();
+      automataUnitTest();
+      analyzeUnitTest();
+      ndpi_self_check_host_match();
+      analysisUnitTest();
+      rulesUnitTest();
 #endif
-
+    }
+    
     gettimeofday(&startup_time, NULL);
     memset(ndpi_thread_info, 0, sizeof(ndpi_thread_info));
 
+  if(getenv("AHO_DEBUG"))
+	  ac_automata_enable_debug(1);
     parseOptions(argc, argv);
 
     ndpi_info_mod = ndpi_init_detection_module(enable_ja3_plus ? ndpi_enable_ja3_plus : ndpi_no_prefs);

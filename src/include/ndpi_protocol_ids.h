@@ -153,7 +153,7 @@ typedef enum {
   NDPI_PROTOCOL_GMAIL                 = 122,
   NDPI_PROTOCOL_GOOGLE_MAPS           = 123,
   NDPI_PROTOCOL_YOUTUBE               = 124,
-  NDPI_PROTOCOL_SKYPE                 = 125,
+  NDPI_PROTOCOL_SKYPE_TEAMS           = 125,
   NDPI_PROTOCOL_GOOGLE                = 126,
   NDPI_PROTOCOL_DCERPC                = 127,
   NDPI_PROTOCOL_NETFLOW               = 128,
@@ -287,6 +287,11 @@ typedef enum {
   NDPI_PROTOCOL_HPVIRTGRP             = 256, /* Toni Uhlig <matzeton@googlemail.com> */
   NDPI_PROTOCOL_GENSHIN_IMPACT        = 257, /* Toni Uhlig <matzeton@googlemail.com> */
   NDPI_PROTOCOL_ACTIVISION            = 258,
+  NDPI_PROTOCOL_FORTICLIENT           = 259,
+  NDPI_PROTOCOL_Z3950                 = 260, /* Toni Uhlig <matzeton@googlemail.com> */
+  NDPI_PROTOCOL_LIKEE                 = 261,
+  NDPI_PROTOCOL_GITLAB                = 262,
+  NDPI_PROTOCOL_AVAST_SECUREDNS       = 263, /* Toni Uhlig <matzeton@googlemail.com> */
 
 #ifdef CUSTOM_NDPI_PROTOCOLS
 #include "../../../nDPI-custom/custom_ndpi_protocol_ids.h"

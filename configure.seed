@@ -87,7 +87,7 @@ NDPI_API_VERSION=`echo $NDPI_API_VERSION | sed 's/^0*//'`
 AC_DEFINE_UNQUOTED(NDPI_GIT_RELEASE, "${GIT_RELEASE}", [GIT Release])
 AC_DEFINE_UNQUOTED(NDPI_GIT_DATE, "${GIT_DATE}", [Last GIT change])
 
-if ! test "${with_mipsel+set}" = set; then :
+if ! test "${with_mipsel+set}" = set && ! test "${with_only_libndpi+set}" = set; then :
    dnl> used by json-c for unit tests
    PKG_CHECK_MODULES([JSONC], [json-c], [JSONC_LIBS=`pkg-config --libs json-c` JSONC_CFLAGS=`pkg-config --cflags json-c`])
 fi
@@ -235,10 +235,6 @@ if test "${with_maxminddb+set}" = set; then :
     AC_DEFINE_UNQUOTED(HAVE_MAXMINDDB, 1, [MaxMind DB support])
   fi
 fi
-
-dnl> TCP segments management (buffer, sort and reassembly the segments)
-dnl> FRAG_MAN_ENABLED=1
-dnl> AC_DEFINE_UNQUOTED(FRAG_MAN, ${FRAG_MAN_ENABLED}, [Enable the TCP segments fragmentation management])
 
 AC_CONFIG_FILES([Makefile example/Makefile example/Makefile.dpdk tests/Makefile tests/unit/Makefile tests/dga/Makefile libndpi.pc src/include/ndpi_define.h src/lib/Makefile python/Makefile fuzz/Makefile src/include/ndpi_api.h])
 AC_CONFIG_FILES([tests/do.sh], [chmod +x tests/do.sh])
